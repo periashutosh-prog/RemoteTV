@@ -17,6 +17,7 @@ from flask import Flask, jsonify, request
 app = Flask(__name__)
 
 # State
+IS_VERCEL = os.environ.get("RUNNING_ON_VERCEL") == "true"
 _remote = None
 _loop = None
 _pairing_instance = None
@@ -24,9 +25,9 @@ _connected_ip = None
 _connected_name = None
 _pairing_lock = threading.Lock()
 
-CERT_DIR = "."
+CERT_DIR = "/tmp" if IS_VERCEL else "."
 PORT = 6466
-CONFIG_FILE = "config.json"
+CONFIG_FILE = os.path.join(CERT_DIR, "config.json")
 
 def cert_path(ip): return os.path.join(CERT_DIR, f"cert_{ip.replace('.','_')}.pem")
 def key_path(ip):  return os.path.join(CERT_DIR, f"key_{ip.replace('.','_')}.pem")
@@ -56,6 +57,10 @@ def get_loop():
     return _loop
 
 def run_async(coro, timeout=15):
+    if IS_VERCEL:
+        # On Vercel, we run synchronously in the request context
+        # Background threads are not supported/reliable in serverless
+        return asyncio.run(coro)
     return asyncio.run_coroutine_threadsafe(coro, get_loop()).result(timeout=timeout)
 
 # ── Remote connection ────────────────────────────────────────────────────────
@@ -121,6 +126,7 @@ def check_ip(ip):
 
 def mdns_scan(timeout=5):
     """Fast scan: check first 30 IPs on local subnet in parallel - no extra libs."""
+    if IS_VERCEL: return [] # Scan won't work in the cloud
     import concurrent.futures
     results = []
     try:
@@ -144,6 +150,7 @@ def mdns_scan(timeout=5):
 
 def deep_scan(progress_callback=None):
     """Scan full subnet concurrently, 10 IPs at a time."""
+    if IS_VERCEL: return [] # Scan won't work in the cloud
     import concurrent.futures
     results = []
     try:
@@ -183,11 +190,15 @@ def state():
 
 @app.route("/scan/fast", methods=["POST"])
 def scan_fast():
+    if IS_VERCEL:
+        return jsonify({"ok": False, "error": "Scanning is only available when running locally. Vercel Cloud cannot access your local network.", "is_vercel": True})
     results = mdns_scan(timeout=5)
     return jsonify({"ok": True, "results": results, "found": len(results) > 0})
 
 @app.route("/scan/deep", methods=["POST"])
 def scan_deep():
+    if IS_VERCEL:
+        return jsonify({"ok": False, "error": "Scanning is only available when running locally. Vercel Cloud cannot access your local network.", "is_vercel": True})
     results = deep_scan()
     return jsonify({"ok": True, "results": results})
 
@@ -600,6 +611,18 @@ async function runScan(){
   $('tv-list').innerHTML='';
   // Fast scan
   const fast=await post('/scan/fast');
+  if(fast.is_vercel){
+    $('scan-spinner').style.display='none';
+    $('scan-text').innerHTML = `Cloud mode: Scanning disabled.<br><br>
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <input id="manual-ip" placeholder="TV IP (e.g. 192.168.1.5)" 
+               style="flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:10px;border-radius:8px;font-family:inherit;font-size:0.8rem">
+        <button onclick="selectTV($('manual-ip').value, 'Manual TV')" 
+                style="background:var(--accent);color:#000;border:none;padding:0 15px;border-radius:8px;font-weight:bold;cursor:pointer;font-family:inherit;font-size:0.75rem">ADD</button>
+      </div>
+      <div style="font-size:0.6rem;color:var(--dim);line-height:1.2">Note: Cloud functions cannot access your local network. You must configure port forwarding or a VPN to reach your TV's port 6466.</div>`;
+    return;
+  }
   if(fast.ok && fast.results && fast.results.length>0){
     $('scan-text').textContent='Found '+fast.results.length+' device(s)';
     $('scan-spinner').style.display='none';
